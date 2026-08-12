@@ -7,7 +7,7 @@ ARG BASE_IMAGE_REGISTRY=docker.io
 # Build stage. The DHI "-dev" variant runs as root and ships a shell, apt, and
 # build tooling -- everything needed to install the wheels.
 # Refresh the digest with: docker buildx imagetools inspect dhi.io/python:3.13-debian13-dev
-FROM python:3.13-slim-bokworm AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 ENV ONYX_RUNNING_IN_DOCKER="true" \
     HF_HOME=/app/.cache/huggingface \
