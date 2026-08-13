@@ -80,6 +80,7 @@ import { dismissNotification } from "@/lib/notifications/api";
 import AccountPopover from "@/sections/sidebar/AccountPopover";
 import ChatSearchCommandMenu from "@/sections/sidebar/ChatSearchCommandMenu";
 import { useQueryController } from "@/providers/QueryControllerProvider";
+import { TokenBudgetBar } from "@/components/TokenBudgetBar";
 
 // Visible-agents = pinned-agents + current-agent (if current-agent not in pinned-agents)
 // OR Visible-agents = pinned-agents (if current-agent in pinned-agents)
@@ -587,6 +588,7 @@ export default function AppSidebar() {
             {isAdmin ? "Admin Panel" : "Curator Panel"}
           </SidebarTab>
         )}
+        {!folded && <TokenBudgetBar />}
         <AccountPopover
           folded={folded}
           onShowBuildIntro={

@@ -11,9 +11,6 @@ export default function LoginText() {
       <Text as="p" headingH2 text05>
         Welcome to {appName}
       </Text>
-      <Text as="p" text03 mainUiMuted>
-        Your open source AI platform for work
-      </Text>
     </div>
   );
 }
