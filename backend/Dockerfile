@@ -16,7 +16,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac1
 # System dependencies for compiling the Python wheels.
 # cmake/libxmlsec1-dev/pkg-config/gcc needed to compile native wheels (e.g. xmlsec)
 # ca-certificates for HTTPS when fetching from PyPI
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources || true && \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list || true && \
+    apt-get update && \
     apt-get install -y \
         cmake \
         curl \
@@ -82,7 +84,9 @@ RUN groupadd -g 1001 onyx && \
 # libxmlsec1-openssl is the runtime counterpart to the build-time libxmlsec1-dev
 # Interactive debugging tools (curl, vim, nano, psql, ps) are deliberately absent to keep the
 # shipped image minimal; they live in the dev stage below, published with a -dev tag suffix.
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources || true && \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list || true && \
+    apt-get update && \
     apt-get install -y \
         zip \
         ca-certificates \
@@ -120,8 +124,11 @@ COPY --from=builder \
 # scripts in their dpkg configure step. The second `playwright install-deps` then restores any
 # chromium runtime libs (libnss3, libnspr4, etc.) that autoremove swept up in the cascade. The
 # runtime image stays perl-free from here on.
-RUN ln -s /usr/local/bin/supervisord /usr/bin/supervisord && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources || true && \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list || true && \
+    ln -s /usr/local/bin/supervisord /usr/bin/supervisord && \
     playwright install chromium && \
+    apt-get update && \
     playwright install-deps chromium && \
     apt-get remove -y --allow-remove-essential perl-base && \
     apt-get autoremove -y && \
@@ -203,7 +210,9 @@ CMD ["tail", "-f", "/dev/null"]
 ####################################################################################################
 FROM runtime AS dev
 
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources || true && \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list || true && \
+    apt-get update && \
     apt-get install -y \
         curl \
         nano \
