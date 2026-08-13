@@ -1,8 +1,7 @@
-"use client";
-
 import { User } from "@/lib/types";
 import { getCurrentUserSS } from "@/lib/users/svcSS";
 import { getAuthTypeMetadataSS, getAuthUrlSS } from "@/lib/auth/svcSS";
+import { fetchSettingsSS } from "@/lib/settings/svcSS";
 import { AuthTypeMetadata } from "@/lib/auth/types";
 import { redirect } from "next/navigation";
 import { EmailPasswordForm, SignInButton } from "@/lib/auth/components";
@@ -11,7 +10,6 @@ import ReferralSourceSelector from "./ReferralSourceSelector";
 import AuthErrorDisplay from "@/components/auth/AuthErrorDisplay";
 import Text from "@/refresh-components/texts/Text";
 import { cn } from "@opal/utils";
-import { useSettings } from "@/lib/settings/hooks";
 
 const Page = async (props: {
   searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
@@ -25,18 +23,18 @@ const Page = async (props: {
     ? searchParams?.email[0]
     : searchParams?.email || null;
 
-  // catch cases where the backend is completely unreachable here
-  // without try / catch, will just raise an exception and the page
-  // will not render
   let authTypeMetadata: AuthTypeMetadata | null = null;
   let currentUser: User | null = null;
+  let combinedSettings = null;
+
   try {
-    [authTypeMetadata, currentUser] = await Promise.all([
+    [authTypeMetadata, currentUser, combinedSettings] = await Promise.all([
       getAuthTypeMetadataSS(),
       getCurrentUserSS(),
+      fetchSettingsSS(),
     ]);
   } catch (e) {
-    console.log(`Some fetch failed for the login page - ${e}`);
+    console.log(`Some fetch failed for the signup page - ${e}`);
   }
 
   // if user is already logged in, take them to the main app page
@@ -62,7 +60,8 @@ const Page = async (props: {
   if (cloud && authTypeMetadata) {
     authUrl = await getAuthUrlSS(authTypeMetadata.multiTenant, null);
   }
-  const { appName } = useSettings();
+
+  const appName = combinedSettings?.appName || "Onyx";
 
   return (
     <AuthFlowContainer authState="signup">
