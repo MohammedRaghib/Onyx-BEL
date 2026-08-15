@@ -68,3 +68,4 @@ plans
 .claude/worktrees/
 !.claude/settings.json
 /data/
+deployment/docker_compose/config.yaml

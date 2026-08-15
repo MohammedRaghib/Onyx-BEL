@@ -45,9 +45,8 @@ def get_token_budget_status(
     # --- collect enabled token limits per scope ---
 
     user_limits = [
-        lim for lim in fetch_all_user_token_rate_limits(
-            db_session, enabled_only=True
-        )
+        lim
+        for lim in fetch_all_user_token_rate_limits(db_session, enabled_only=True)
         if lim.token_budget is not None and lim.token_budget > 0
     ]
 
@@ -64,9 +63,8 @@ def get_token_budget_status(
     ]
 
     global_limits = [
-        lim for lim in fetch_all_global_token_rate_limits(
-            db_session, enabled_only=True
-        )
+        lim
+        for lim in fetch_all_global_token_rate_limits(db_session, enabled_only=True)
         if lim.token_budget is not None and lim.token_budget > 0
     ]
 
@@ -87,18 +85,12 @@ def get_token_budget_status(
         active_limit = min(
             group_limits, key=lambda l: l.token_budget * TOKEN_BUDGET_UNIT
         )
-        group_ids = list(group_limits_by_group.keys())
         cutoff = get_token_window_start(now, active_limit.period_hours)
-        buckets_by_group = get_group_token_buckets_since(
+        buckets = get_user_token_buckets_since(
             db_session=db_session,
-            user_group_ids=group_ids,
+            user_id=str(user.id),
             cutoff=cutoff,
         )
-        # flatten all groups this user belongs to into one list
-        buckets = [
-            b for group_buckets in buckets_by_group.values()
-            for b in group_buckets
-        ]
 
     elif global_limits:
         active_limit = min(

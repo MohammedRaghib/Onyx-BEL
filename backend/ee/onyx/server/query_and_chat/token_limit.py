@@ -71,7 +71,9 @@ def _user_is_rate_limited(user_id: UUID) -> None:
         ]
         if token_limits:
             user_cutoff_time = _get_cutoff_time(token_limits)
-            user_usage = _fetch_user_usage(user_id, user_cutoff_time, db_session)
+            user_usage = get_user_token_buckets_since(
+                db_session, str(user_id), user_cutoff_time
+            )
             token_reset = _token_budget_reset(user_rate_limits, user_usage)
 
         cost_reset: datetime | None = None
@@ -111,9 +113,8 @@ def _user_is_rate_limited_by_group(user_id: UUID) -> None:
         all_rate_limits = [
             limit for limits in group_rate_limits.values() for limit in limits
         ]
-        user_group_ids = list(group_rate_limits)
 
-        group_token_usage: dict[int, list[TokenUsageBucket]] = {}
+        user_token_usage: list[TokenUsageBucket] = []
         if _has_token_budget(all_rate_limits):
             token_limits = [
                 limit
@@ -121,11 +122,11 @@ def _user_is_rate_limited_by_group(user_id: UUID) -> None:
                 if limit.token_budget is not None and limit.token_budget > 0
             ]
             token_cutoff = _get_cutoff_time(token_limits)
-            group_token_usage = _fetch_user_group_usage(
-                user_group_ids, token_cutoff, db_session
+            user_token_usage = get_user_token_buckets_since(
+                db_session, str(user_id), token_cutoff
             )
 
-        group_cost_usage: dict[int, list[tuple[datetime, float]]] = {}
+        user_cost_usage: list[tuple[datetime, float]] = []
         cost_limits = [
             limit for limit in all_rate_limits if limit.cost_budget_cents is not None
         ]
@@ -134,19 +135,14 @@ def _user_is_rate_limited_by_group(user_id: UUID) -> None:
                 datetime.now(timezone.utc),
                 max(limit.period_hours for limit in cost_limits),
             )
-            group_cost_usage = get_group_cost_cents_buckets_since(
-                db_session, user_group_ids, cost_cutoff
+            user_cost_usage = get_user_cost_cents_buckets_since(
+                db_session, str(user_id), cost_cutoff
             )
 
         group_resets: list[datetime] = []
-        for user_group_id, rate_limits in group_rate_limits.items():
-            token_reset = _token_budget_reset(
-                rate_limits, group_token_usage.get(user_group_id, [])
-            )
-            cost_reset = _cost_budget_reset(
-                rate_limits, group_cost_usage.get(user_group_id, [])
-            )
-            # A group the user is under (no exceeded budget) unblocks them entirely.
+        for _user_group_id, rate_limits in group_rate_limits.items():
+            token_reset = _token_budget_reset(rate_limits, user_token_usage)
+            cost_reset = _cost_budget_reset(rate_limits, user_cost_usage)
             if token_reset is None and cost_reset is None:
                 return
             resets = [reset for reset in (token_reset, cost_reset) if reset is not None]
