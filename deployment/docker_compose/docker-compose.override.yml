@@ -7,6 +7,10 @@ services:
     volumes:
       - ${OPENSEARCH_DATA_DIR:-./../../data/opensearch}:/usr/share/opensearch/data
 
+  minio:
+    volumes:
+      - ${MINIO_DATA_DIR:-./../../data/minio}:/export
+
   api_server:
     volumes:
       - ../../backend:/app/backend
@@ -41,30 +45,3 @@ services:
     environment:
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://localhost:8888/}
     restart: unless-stopped
-
-  langfuse:
-    image: langfuse/langfuse:2
-    container_name: langfuse
-    ports:
-      - "${LANGFUSE_PORT:-3002}:3000"
-    environment:
-      - DATABASE_URL=${LANGFUSE_DATABASE_URL}
-      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET}
-      - SALT=${LANGFUSE_SALT}
-      - NEXTAUTH_URL=${LANGFUSE_NEXTAUTH_URL}
-      - TELEMETRY_ENABLED=${LANGFUSE_TELEMETRY_ENABLED}
-    depends_on:
-      - relational_db
-    restart: unless-stopped
-
-  # litellm:
-  #   image: ghcr.io/berriai/litellm:main
-  #   container_name: litellm_proxy
-  #   ports:
-  #     - "${LITELLM_PORT:-4100}:4000"
-  #   env_file:
-  #     - .env
-  #   volumes:
-  #     - ${LITELLM_CONFIG_DIR:-./litellm/config.yaml}:/app/config.yaml
-  #   command: [ "--config", "/app/config.yaml", "--port", "4000" ]
-  #   restart: unless-stopped
