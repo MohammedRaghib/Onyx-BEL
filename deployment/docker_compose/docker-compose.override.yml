@@ -1,25 +1,67 @@
+x-networks: &network
+  networks:
+    - central-net
+    - default
+
+networks:
+  central-net:
+    external: true
+
 services:
   relational_db:
+    profiles: ["disabled"]
+
+  cache:
+    profiles: ["disabled"]
+
+  api_server:
+    <<: *network
+    depends_on:
+      relational_db:
+        required: false
+      cache:
+        required: false
+      opensearch:
+        condition: service_started
+      inference_model_server:
+        condition: service_started
     volumes:
-      - ${POSTGRES_DATA_DIR:-./../../data/postgres}:/var/lib/postgresql/data
+      - ../../backend:/app/backend
+
+  background:
+    <<: *network
+    depends_on:
+      relational_db:
+        required: false
+      cache:
+        required: false
+      opensearch:
+        condition: service_started
+      inference_model_server:
+        condition: service_started
+      indexing_model_server:
+        condition: service_started
 
   opensearch:
+    <<: *network
     volumes:
       - ${OPENSEARCH_DATA_DIR:-./../../data/opensearch}:/usr/share/opensearch/data
 
   minio:
+    <<: *network
     volumes:
       - ${MINIO_DATA_DIR:-./../../data/minio}:/export
 
-  api_server:
-    volumes:
-      - ../../backend:/app/backend
-
   inference_model_server:
+    <<: *network
     volumes:
       - ../../model_server:/app/model_server
 
   web_server:
+    <<: *network
+    depends_on:
+      api_server:
+        condition: service_healthy
     build:
       context: ../../web
       dockerfile: Dockerfile
@@ -36,6 +78,7 @@ services:
       - /app/node_modules
 
   searxng:
+    <<: *network
     image: searxng/searxng:latest
     container_name: searxng
     ports:
