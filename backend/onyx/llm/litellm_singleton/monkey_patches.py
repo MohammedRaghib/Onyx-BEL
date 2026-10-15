@@ -33,18 +33,26 @@ Status checked against LiteLLM v1.93.0 (2026-07-20):
 3. OpenAI Responses API Non-Streaming (_patch_openai_responses_transform_response):
    - LiteLLM's transform_response joins multiple reasoning summary parts with spaces
    - We prefer double newlines for readability
+   - Also returns an empty assistant message with finish_reason "length" when the
+     response is incomplete (max_output_tokens) and carries no message item, e.g.
+     a reasoning model that spent the whole budget on reasoning. Upstream raises
+     ValueError there, which surfaces as APIConnectionError; streaming returns an
+     empty message for the same reply.
    STATUS: STILL NEEDED - Upstream now uses " ".join() instead of discarding earlier
            parts, but we override to use "\\n\\n".join() for readable section breaks.
+           The incomplete-reply handling is fixed upstream in v1.99.0 (BerriAI/litellm
+           PR #37710); drop _incomplete_response_as_empty_message once we are on >= 1.99.0.
 
-4. Azure Responses API Fake Streaming (_patch_azure_responses_should_fake_stream):
-   - LiteLLM uses "fake streaming" (MockResponsesAPIStreamingIterator) for models
-     not in its database, which buffers the entire response before yielding
-   - This causes poor time-to-first-token for Azure custom model deployments
-   - Azure's Responses API supports native streaming, so we force real streaming
-   STATUS: STILL NEEDED - AzureOpenAIResponsesAPIConfig does NOT override should_fake_stream,
-           so it inherits from OpenAIResponsesAPIConfig which returns True for models not
-           in litellm.utils.supports_native_streaming(). Custom Azure deployments will
-           still use fake streaming without this patch.
+4. Responses API Fake Streaming (_patch_openai_responses_should_fake_stream):
+   - LiteLLM fake-streams (MockResponsesAPIStreamingIterator) any responses-API
+     call whose model its registry doesn't recognize, buffering the whole
+     generation before the first chunk. Azure custom deployments and
+     OpenAI-compatible gateway aliases (Bifrost/Portkey responses mode) are
+     never in the registry
+   - Patched on the base OpenAIResponsesAPIConfig; AzureOpenAIResponsesAPIConfig
+     inherits it (no upstream override). Models the registry explicitly marks
+     supports_native_streaming=False (e.g. o1-pro) keep the fake stream
+   STATUS: STILL NEEDED - v1.93.0 treats a registry miss as "cannot stream".
 
 # Note: 5 and 6 suppress a warning and may fix usage info but are not strictly required
 5. Responses API Usage Format Mismatch (_patch_responses_api_usage_format):
@@ -80,14 +88,22 @@ Status checked against LiteLLM v1.93.0 (2026-07-20):
      unconditionally and pass the remainder through as the literal model id
    STATUS: STILL NEEDED - v1.93.0 consults the registry before honoring the prefix.
 
-8. OpenAI Responses API Fake Streaming (_patch_openai_responses_should_fake_stream):
-   - Same defect as 4 on the base OpenAIResponsesAPIConfig, which
-     OpenAI-compatible gateways (Bifrost/Portkey responses mode) resolve to:
-     registry-miss models are downgraded to fake streaming, buffering the
-     whole generation before the first chunk
-   - Unlike 4, models the registry explicitly marks
-     supports_native_streaming=False (e.g. o1-pro) keep the fake stream
-   STATUS: STILL NEEDED - v1.93.0 treats a registry miss as "cannot stream".
+8. Disabled Thinking Dropped On Tool Turns (_patch_anthropic_keeps_disabled_thinking):
+   - AnthropicConfig.transform_request drops the thinking param when the last
+     assistant message with tool_calls carries no thinking blocks, guarding against
+     "Expected thinking or redacted_thinking, but found tool_use"
+   - The guard tests `thinking is not None` rather than whether thinking is enabled,
+     so it also drops thinking={"type": "disabled"}, the one value that cannot
+     produce that error: disabled thinking is the state in which Anthropic requires
+     those blocks to be absent
+   - Reasoning off then silently becomes the API's own default on every turn after a
+     tool call, which on the Claude 5 line is full reasoning
+   - Bedrock Converse carries its own copy of the same check in
+     AmazonConverseConfig._transform_request_helper, and keeps thinking under
+     additionalModelRequestFields rather than at the top level, so both transforms
+     are wrapped
+   STATUS: STILL NEEDED - v1.93.0 gates on presence, not on the thinking type.
+
 """
 
 import time
@@ -114,7 +130,9 @@ def _patch_ollama_chunk_parser() -> None:
     reasoning content and content in streaming responses.
     """
     if (
-        getattr(OllamaChatCompletionResponseIterator.chunk_parser, "__name__", "")
+        getattr(  # ods: ignore[getattr]
+            OllamaChatCompletionResponseIterator.chunk_parser, "__name__", ""
+        )
         == "_patched_chunk_parser"
     ):
         return
@@ -172,7 +190,9 @@ def _patch_ollama_chunk_parser() -> None:
             if chunk["message"].get("content") is not None:
                 message_content = chunk["message"].get("content")
                 # Track whether we are inside <think>...</think> tagged content.
-                in_think_tag_block = bool(getattr(self, "_in_think_tag_block", False))
+                in_think_tag_block = bool(
+                    getattr(self, "_in_think_tag_block", False)  # ods: ignore[getattr]
+                )
                 if "<think>" in message_content:
                     message_content = message_content.replace("<think>", "")
                     self.started_reasoning_content = True
@@ -256,9 +276,7 @@ def _patch_ollama_chunk_parser() -> None:
         except Exception as e:
             raise e
 
-    OllamaChatCompletionResponseIterator.chunk_parser = (  # ty: ignore[invalid-assignment]
-        _patched_chunk_parser
-    )
+    OllamaChatCompletionResponseIterator.chunk_parser = _patched_chunk_parser
 
 
 def _patch_responses_reasoning_summary_newlines() -> None:
@@ -271,7 +289,7 @@ def _patch_responses_reasoning_summary_newlines() -> None:
     the summary_index changes, producing readable section breaks.
     """
     if (
-        getattr(
+        getattr(  # ods: ignore[getattr]
             OpenAiResponsesToChatCompletionStreamIterator.chunk_parser,
             "__name__",
             "",
@@ -303,7 +321,7 @@ def _patch_responses_reasoning_summary_newlines() -> None:
                 summary_index = parsed_chunk.get("summary_index", 0)
 
                 # Track the last summary index to insert newlines between parts
-                last_summary_index = getattr(
+                last_summary_index = getattr(  # ods: ignore[getattr]
                     self, "_last_reasoning_summary_index", None
                 )
                 if (
@@ -351,9 +369,84 @@ def _patch_responses_reasoning_summary_newlines() -> None:
         return _original_responses_chunk_parser(self, chunk)
 
     _patched_responses_chunk_parser.__name__ = "_patched_responses_chunk_parser"
-    OpenAiResponsesToChatCompletionStreamIterator.chunk_parser = (  # ty: ignore[invalid-assignment]
+    OpenAiResponsesToChatCompletionStreamIterator.chunk_parser = (
         _patched_responses_chunk_parser
     )
+
+
+_INCOMPLETE_REASON_TO_FINISH_REASON = {
+    "max_output_tokens": "length",
+    "content_filter": "content_filter",
+}
+
+
+def _incomplete_response_as_empty_message(
+    model: str, raw_response: Any, model_response: Any
+) -> Any | None:
+    """Build the chat response for an incomplete Responses API reply whose
+    output holds nothing but reasoning items, or None for any other reply.
+
+    A reasoning model can spend all of max_output_tokens on reasoning. The
+    reply is then "incomplete" with no message item, upstream finds no
+    choices and raises. Streaming returns an empty message for the same
+    reply; mirror that, keep the reasoning summary, and report the truncation
+    as the finish reason. Every other shape, including an incomplete reply
+    that does carry a message, goes through upstream untouched.
+    """
+    from litellm.responses.utils import ResponseAPILoggingUtils
+    from litellm.types.llms.openai import ResponsesAPIResponse
+    from litellm.types.utils import Choices, Message
+    from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
+    if not isinstance(raw_response, ResponsesAPIResponse):
+        return None
+    if raw_response.error is not None:
+        return None
+    details = raw_response.incomplete_details
+    if details is None or not details.reason:
+        return None
+    if not raw_response.output or not all(
+        isinstance(item, ResponseReasoningItem) for item in raw_response.output
+    ):
+        return None
+
+    summary_texts: list[str] = [
+        summary.text
+        for item in raw_response.output
+        if isinstance(item, ResponseReasoningItem)
+        for summary in item.summary
+        if summary.text
+    ]
+    model_response.choices = [
+        Choices(
+            finish_reason=_INCOMPLETE_REASON_TO_FINISH_REASON.get(
+                details.reason, "stop"
+            ),
+            index=0,
+            message=Message(
+                content=None,
+                role="assistant",
+                reasoning_content="\n\n".join(summary_texts) or None,
+            ),
+        )
+    ]
+    model_response.model = model
+    model_response.usage = (
+        ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
+            raw_response.usage
+        )
+    )
+    # Same as upstream's completed path: keep provider headers (x-request-id)
+    # so a truncated reply is as traceable as a complete one.
+    hidden_params = getattr(  # ods: ignore[getattr]
+        raw_response, "_hidden_params", None
+    )
+    if hidden_params:
+        model_response._hidden_params = {
+            **(model_response._hidden_params or {}),
+            **hidden_params,
+        }
+    return model_response
 
 
 def _patch_openai_responses_transform_response() -> None:
@@ -366,7 +459,7 @@ def _patch_openai_responses_transform_response() -> None:
     )
 
     if (
-        getattr(
+        getattr(  # ods: ignore[getattr]
             original_transform_response,
             "__name__",
             "",
@@ -392,6 +485,12 @@ def _patch_openai_responses_transform_response() -> None:
         from litellm.types.llms.openai import ResponsesAPIResponse
         from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
+        incomplete = _incomplete_response_as_empty_message(
+            model, raw_response, model_response
+        )
+        if incomplete is not None:
+            return incomplete
+
         result = original_transform_response(
             self,
             model,
@@ -416,7 +515,11 @@ def _patch_openai_responses_transform_response() -> None:
                 summary_texts = [
                     text
                     for summary_item in item.summary
-                    if (text := getattr(summary_item, "text", ""))
+                    if (
+                        text := getattr(  # ods: ignore[getattr]
+                            summary_item, "text", ""
+                        )
+                    )
                 ]
                 if len(summary_texts) > 1:
                     combined_text = "\n\n".join(summary_texts)
@@ -424,52 +527,60 @@ def _patch_openai_responses_transform_response() -> None:
 
         if combined_text and hasattr(result, "choices"):
             for choice in result.choices:
-                message = getattr(choice, "message", None)
-                if message is not None and getattr(message, "reasoning_content", None):
+                message = getattr(choice, "message", None)  # ods: ignore[getattr]
+                if message is not None and getattr(  # ods: ignore[getattr]
+                    message, "reasoning_content", None
+                ):
                     message.reasoning_content = combined_text
 
         return result
 
     _patched_transform_response.__name__ = "_patched_transform_response"
-    LiteLLMResponsesTransformationHandler.transform_response = (  # ty: ignore[invalid-assignment]
+    LiteLLMResponsesTransformationHandler.transform_response = (
         _patched_transform_response
     )
 
 
-def _patch_azure_responses_should_fake_stream() -> None:
+def _patch_openai_responses_should_fake_stream() -> None:
     """
-    Patches AzureOpenAIResponsesAPIConfig.should_fake_stream to always return False.
-
-    By default, LiteLLM uses "fake streaming" (MockResponsesAPIStreamingIterator) for models
-    not in its database. This causes Azure custom model deployments to buffer the entire
-    response before yielding, resulting in poor time-to-first-token.
-
-    Azure's Responses API supports native streaming, so we override this to always use
-    real streaming (SyncResponsesAPIStreamingIterator).
+    Patches OpenAIResponsesAPIConfig.should_fake_stream so a registry miss
+    (e.g. a gateway model alias or Azure custom deployment) streams natively
+    instead of buffering the generation. Models explicitly marked
+    supports_native_streaming=False (e.g. o1-pro) keep the fake stream — a
+    native stream request would be rejected upstream.
+    AzureOpenAIResponsesAPIConfig inherits this patch.
     """
-    from litellm.llms.azure.responses.transformation import (
-        AzureOpenAIResponsesAPIConfig,
-    )
+    from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 
     if (
-        getattr(AzureOpenAIResponsesAPIConfig.should_fake_stream, "__name__", "")
-        == "_patched_should_fake_stream"
+        getattr(  # ods: ignore[getattr]
+            OpenAIResponsesAPIConfig.should_fake_stream, "__name__", ""
+        )
+        == "_patched_openai_should_fake_stream"
     ):
         return
 
-    def _patched_should_fake_stream(
+    def _patched_openai_should_fake_stream(
         self: Any,  # noqa: ARG001
-        model: Optional[str],  # noqa: ARG001
-        stream: Optional[bool],  # noqa: ARG001
-        custom_llm_provider: Optional[str] = None,  # noqa: ARG001
+        model: Optional[str],
+        stream: Optional[bool],
+        custom_llm_provider: Optional[str] = None,
     ) -> bool:
-        # Azure Responses API supports native streaming - never fake it
-        return False
+        import litellm
 
-    _patched_should_fake_stream.__name__ = "_patched_should_fake_stream"
-    AzureOpenAIResponsesAPIConfig.should_fake_stream = (  # ty: ignore[invalid-assignment]
-        _patched_should_fake_stream
-    )
+        if stream is not True or model is None:
+            return False
+        try:
+            model_info = litellm.get_model_info(
+                model=model, custom_llm_provider=custom_llm_provider
+            )
+        except Exception:
+            # Registry miss (e.g. gateway alias): assume native streaming.
+            return False
+        return model_info.get("supports_native_streaming") is False
+
+    _patched_openai_should_fake_stream.__name__ = "_patched_openai_should_fake_stream"
+    OpenAIResponsesAPIConfig.should_fake_stream = _patched_openai_should_fake_stream
 
 
 def _patch_openai_responses_should_fake_stream() -> None:
@@ -537,7 +648,7 @@ def _patch_responses_api_usage_format() -> None:
 
     original_model_construct = ResponsesAPIResponse.model_construct
 
-    if getattr(original_model_construct, "_is_patched", False):
+    if getattr(original_model_construct, "_is_patched", False):  # ods: ignore[getattr]
         return
 
     @classmethod
@@ -612,7 +723,7 @@ def _patch_logging_assembled_streaming_response() -> None:
 
     original_method = LiteLLMLoggingObj._get_assembled_streaming_response
 
-    if getattr(original_method, "_is_patched", False):
+    if getattr(original_method, "_is_patched", False):  # ods: ignore[getattr]
         return
 
     def _patched_get_assembled_streaming_response(
@@ -689,7 +800,7 @@ def _patch_logging_assembled_streaming_response() -> None:
     _patched_get_assembled_streaming_response._is_patched = (  # ty: ignore[unresolved-attribute]
         True
     )
-    LiteLLMLoggingObj._get_assembled_streaming_response = (  # ty: ignore[invalid-assignment]
+    LiteLLMLoggingObj._get_assembled_streaming_response = (
         _patched_get_assembled_streaming_response
     )
 
@@ -708,7 +819,9 @@ def _patch_responses_api_bridge_check() -> None:
     import litellm.main as litellm_main
 
     if (
-        getattr(litellm_main.responses_api_bridge_check, "__name__", "")
+        getattr(  # ods: ignore[getattr]
+            litellm_main.responses_api_bridge_check, "__name__", ""
+        )
         == "_patched_responses_api_bridge_check"
     ):
         return
@@ -740,6 +853,100 @@ def _patch_responses_api_bridge_check() -> None:
     )
 
 
+def _disabled_thinking(optional_params: dict) -> dict | None:
+    """The thinking param when it explicitly asks for no thinking at all."""
+    thinking = optional_params.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return thinking
+    return None
+
+
+def _patch_anthropic_keeps_disabled_thinking() -> None:
+    """
+    Patches the two Anthropic request transforms to keep an explicit
+    thinking={"type": "disabled"} on a turn whose history carries tool calls
+    with no thinking blocks.
+
+    Upstream drops the param there to avoid "Expected thinking or
+    redacted_thinking, but found tool_use", but it gates on `thinking is not
+    None` rather than on thinking being enabled. Disabled thinking cannot raise
+    that error: it is the state where Anthropic requires the blocks to be
+    absent, which is exactly what we send. Dropping it silently returns the
+    model to its default effort, which on the Claude 5 line is full reasoning.
+
+    Bedrock Converse carries its own copy of the same check, and puts thinking
+    under additionalModelRequestFields rather than at the top level, so it
+    needs its own wrapper.
+    """
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+    from litellm.llms.bedrock.chat.converse_transformation import AmazonConverseConfig
+
+    if (
+        AnthropicConfig.transform_request.__name__
+        != "_patched_anthropic_transform_request"
+    ):
+        original_transform_request = AnthropicConfig.transform_request
+
+        def _patched_anthropic_transform_request(
+            self: Any,
+            model: str,
+            messages: list[Any],
+            optional_params: dict,
+            litellm_params: dict,
+            headers: dict,
+        ) -> dict:
+            thinking = _disabled_thinking(optional_params)
+            body = original_transform_request(
+                self, model, messages, optional_params, litellm_params, headers
+            )
+            if thinking is not None and "thinking" not in body:
+                body["thinking"] = thinking
+            return body
+
+        _patched_anthropic_transform_request.__name__ = (
+            "_patched_anthropic_transform_request"
+        )
+        AnthropicConfig.transform_request = _patched_anthropic_transform_request
+
+    if (
+        AmazonConverseConfig._transform_request_helper.__name__
+        != "_patched_converse_transform_request_helper"
+    ):
+        original_request_helper = AmazonConverseConfig._transform_request_helper
+
+        def _patched_converse_transform_request_helper(
+            self: Any,
+            model: str,
+            system_content_blocks: list[Any],
+            optional_params: dict,
+            messages: Optional[list[Any]] = None,
+            headers: Optional[dict] = None,
+            drop_params: bool = False,
+        ) -> Any:
+            thinking = _disabled_thinking(optional_params)
+            data = original_request_helper(
+                self,
+                model=model,
+                system_content_blocks=system_content_blocks,
+                optional_params=optional_params,
+                messages=messages,
+                headers=headers,
+                drop_params=drop_params,
+            )
+            if thinking is not None:
+                fields = data.get("additionalModelRequestFields") or {}
+                fields.setdefault("thinking", thinking)
+                data["additionalModelRequestFields"] = fields
+            return data
+
+        _patched_converse_transform_request_helper.__name__ = (
+            "_patched_converse_transform_request_helper"
+        )
+        AmazonConverseConfig._transform_request_helper = (
+            _patched_converse_transform_request_helper
+        )
+
+
 def apply_monkey_patches() -> None:
     """
     Apply all necessary monkey patches to LiteLLM for compatibility.
@@ -748,17 +955,18 @@ def apply_monkey_patches() -> None:
     - Patching OllamaChatCompletionResponseIterator.chunk_parser for streaming content
     - Patching chunk_parser for reasoning summary newline insertion between sections
     - Patching LiteLLMResponsesTransformationHandler.transform_response for non-streaming responses
-    - Patching AzureOpenAIResponsesAPIConfig.should_fake_stream to enable native streaming
-    - Patching OpenAIResponsesAPIConfig.should_fake_stream to stream natively on registry misses
+    - Patching OpenAIResponsesAPIConfig.should_fake_stream (Azure inherits) to stream
+      natively on registry misses
     - Patching ResponsesAPIResponse.model_construct to fix usage format in all code paths
     - Patching Logging._get_assembled_streaming_response to avoid mutating original response
     - Patching responses_api_bridge_check to always honor an explicit responses/ prefix
+    - Patching AnthropicConfig.transform_request to keep disabled thinking on tool turns
     """
     _patch_ollama_chunk_parser()
     _patch_responses_reasoning_summary_newlines()
     _patch_openai_responses_transform_response()
-    _patch_azure_responses_should_fake_stream()
     _patch_openai_responses_should_fake_stream()
     _patch_responses_api_usage_format()
     _patch_logging_assembled_streaming_response()
     _patch_responses_api_bridge_check()
+    _patch_anthropic_keeps_disabled_thinking()

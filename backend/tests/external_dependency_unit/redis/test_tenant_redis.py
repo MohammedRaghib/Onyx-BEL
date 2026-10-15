@@ -136,6 +136,16 @@ class TestRoundTrip:
             None,
         ]
 
+    def test_set_mget(self, tenant_redis: TenantRedisClient) -> None:
+        first, second = _unique_key(), _unique_key()
+        tenant_redis.set(first, "v1")
+        tenant_redis.set(second, "v2")
+        assert tenant_redis.mget([first, second, _unique_key()]) == [
+            b"v1",
+            b"v2",
+            None,
+        ]
+
     def test_incr_then_get_sees_same_counter(
         self, tenant_redis: TenantRedisClient
     ) -> None:
@@ -452,3 +462,19 @@ class TestPipeline:
 
         members = raw_redis.smembers(f"{tenant_id}:{key}")
         assert members == {b"a", b"b", b"c"}
+
+
+def test_renew_if_value_renews_only_the_tenant_key(
+    tenant_redis: TenantRedisClient, tenant_id: str, raw_redis: Redis
+) -> None:
+    key = _unique_key()
+    tenant_redis.set(key, "owner", ex=10)
+    raw_redis.set(key, "owner", ex=10)
+    try:
+        assert not tenant_redis.renew_if_value(key, b"other", 60)
+        assert tenant_redis.renew_if_value(key, b"owner", 60)
+        assert cast(int, raw_redis.ttl(f"{tenant_id}:{key}")) > 10
+        assert cast(int, raw_redis.ttl(key)) <= 10
+        assert not tenant_redis.renew_if_value(_unique_key(), b"owner", 60)
+    finally:
+        raw_redis.delete(key)

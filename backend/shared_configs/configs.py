@@ -78,6 +78,10 @@ DEV_LOGGING_ENABLED = os.environ.get("DEV_LOGGING_ENABLED", "").lower() == "true
 LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "true").lower() != "false"
 # notset, debug, info, notice, warning, error, or critical
 LOG_LEVEL = os.environ.get("LOG_LEVEL") or "info"
+# Chatty third-party libraries (LiteLLM, httpcore, botocore, ...) are capped at
+# INFO even when LOG_LEVEL=debug — LiteLLM alone emits several DEBUG records per
+# streamed token. Set LOG_THIRD_PARTY_DEBUG=true to let them log at LOG_LEVEL.
+LOG_THIRD_PARTY_DEBUG = os.environ.get("LOG_THIRD_PARTY_DEBUG", "").lower() == "true"
 
 # Log output format: "plain" (human-readable text, default) or "json" (structured
 # single-line JSON, suitable for container log aggregators). When "json", context
@@ -229,9 +233,6 @@ IGNORED_SYNCING_TENANT_LIST = (
     if IGNORED_SYNCING_TENANT_IDS
     else None
 )
-
-ENVIRONMENT = os.environ.get("ENVIRONMENT") or "not_explicitly_set"
-
 
 #####
 # Usage Limits Configuration (meant for cloud, off by default for self-hosted)

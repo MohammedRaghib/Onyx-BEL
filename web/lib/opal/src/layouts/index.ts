@@ -31,6 +31,13 @@ export {
   type InputPadderProps,
 } from "@opal/layouts/inputs/components";
 
+/* StickyBox */
+export {
+  StickyBox,
+  type StickyBoxProps,
+  type StickyEdge,
+} from "@opal/layouts/sticky-box/components";
+
 /* IllustrationContent */
 export {
   IllustrationContent,
@@ -68,14 +75,15 @@ export type {
 /* SidebarLayouts */
 export * as SidebarLayouts from "@opal/layouts/sidebar/components";
 export { type SidebarRootProps } from "@opal/layouts/sidebar/components";
+export { useSidebarFolded } from "@opal/layouts/sidebar/context";
 
 /* AuthLayouts */
 export * as AuthLayouts from "@opal/layouts/auth/components";
 export type {
   CardProps as AuthCardProps,
   FieldsProps as AuthFieldsProps,
+  OrSeparatorProps as AuthOrSeparatorProps,
   SubmitProps as AuthSubmitProps,
-  SubmitLabel as AuthSubmitLabel,
 } from "@opal/layouts/auth/components";
 
 /* TagList */

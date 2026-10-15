@@ -22,6 +22,10 @@ class QueryExpansionType(Enum):
 
 
 class SearchSettingsCreationRequest(IndexingSetting):
+    # cc_pairs the admin consented to delete (shown as "won't be ported"). Gates deletion:
+    # the server rejects if its authoritative recompute includes an unacknowledged cc_pair.
+    acknowledged_wont_port_cc_pair_ids: list[int] | None = None
+
     @classmethod
     def from_db_model(
         cls, search_settings: SearchSettings
@@ -54,6 +58,10 @@ class SavedSearchSettings(IndexingSetting):
             enable_contextual_rag=search_settings.enable_contextual_rag,
             contextual_rag_model_configuration_id=search_settings.contextual_rag_model_configuration_id,
         )
+
+
+class ContextualRagModelUpdateResponse(BaseModel):
+    contextual_rag_model_configuration_id: int
 
 
 class Tag(BaseModel):
@@ -146,6 +154,11 @@ class IndexFilters(BaseFilters, UserFileFilters, AssistantKnowledgeFilters):
     # DocumentAccess::to_acl.
     access_control_list: list[str] | None
     tenant_id: str | None = None
+    # Operator-forced document-set scope (NAMES, not IDs). When set, retrieval is
+    # restricted to these sets via a standalone AND clause — distinct from
+    # `document_set` (a user/persona OR-scope). Set only on the Search UI path
+    # (from FORCED_DOCUMENT_SET_NAMES); None = no restriction.
+    forced_document_set: list[str] | None = None
 
 
 class BasicChunkRequest(BaseModel):
@@ -163,9 +176,6 @@ class BasicChunkRequest(BaseModel):
 class ChunkSearchRequest(BasicChunkRequest):
     # Final filters are calculated from these
     user_selected_filters: BaseFilters | None = None
-
-    # Use with caution!
-    bypass_acl: bool = False
 
 
 # From the Chat Session we know what project (if any) this search should include
@@ -203,6 +213,7 @@ class InferenceChunk(BaseChunk):
     match_highlights: list[str]
     doc_summary: str
     chunk_context: str
+    source_types: tuple[DocumentSource, ...] | None = None
 
     # when the doc was last updated
     updated_at: datetime | None
@@ -274,8 +285,7 @@ class InferenceChunkUncleaned(InferenceChunk):
         inference_chunk_data = {
             k: v
             for k, v in self.model_dump().items()
-            if k
-            not in ["metadata_suffix"]  # May be other fields to throw out in the future
+            if k != "metadata_suffix"  # May be other fields to throw out in the future
         }
         return InferenceChunk(**inference_chunk_data)
 
@@ -309,6 +319,7 @@ class SearchDoc(BaseModel):
     # to specify that a set of words should be highlighted. For example:
     # ["<hi>the</hi> <hi>answer</hi> is 42", "the answer is <hi>42</hi>""]
     match_highlights: list[str]
+    source_types: tuple[DocumentSource, ...] | None = None
     # when the doc was last updated
     updated_at: datetime | None = None
     primary_owners: list[str] | None = None
@@ -342,6 +353,7 @@ class SearchDoc(BaseModel):
                 link=chunk.source_links[0] if chunk.source_links else None,
                 blurb=chunk.blurb,
                 source_type=chunk.source_type,
+                source_types=chunk.source_types,
                 boost=chunk.boost,
                 hidden=chunk.hidden,
                 metadata=chunk.metadata,

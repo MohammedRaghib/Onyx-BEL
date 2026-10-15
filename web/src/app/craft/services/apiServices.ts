@@ -4,7 +4,6 @@ import {
   ApiMessageResponse,
   ApiInteractiveTurnResponse,
   ApiArtifactResponse,
-  ApiUsageLimitsResponse,
   ApiWebappInfoResponse,
   ApiSandboxStatusResponse,
   SessionHistoryItem,
@@ -12,7 +11,6 @@ import {
   BuildMessageAttachment,
   BuildMessage,
   StreamPacket,
-  UsageLimits,
   DirectoryListing,
   SharingScope,
   ApiSessionSkillsState,
@@ -22,15 +20,14 @@ import {
   ApprovalSubmitDecision,
   ApprovalView,
 } from "@/app/craft/types/approvals";
+import {
+  RATE_LIMITED_ERROR_CODE,
+  RateLimitDetails,
+} from "@/app/app/interfaces";
 import { BUILD_API_BASE } from "@/app/craft/v1/constants";
+import type { ErrorResponseBody } from "@/lib/fetcher";
 import { CRAFT_GATEWAY_PROVIDER } from "@/app/craft/onboarding/constants";
 import type { BuildLlmSelection } from "@/app/craft/onboarding/constants";
-
-// =============================================================================
-// API Configuration
-// =============================================================================
-
-export const USAGE_LIMITS_ENDPOINT = `${BUILD_API_BASE}/limit`;
 
 // =============================================================================
 // SSE Stream Processing
@@ -63,7 +60,7 @@ export async function processSSEStream(
         const dataStr = line.slice(line.indexOf(":") + 1).trim();
         if (dataStr) {
           try {
-            const data = JSON.parse(dataStr);
+            const data: StreamPacket = JSON.parse(dataStr);
             // The backend sends `event: message` for all events and puts the
             // actual type in data.type. Only use SSE event type as fallback
             // if data.type is not present and SSE event is not "message".
@@ -99,7 +96,7 @@ export interface CreateSessionOptions {
 // falling back to the status code when the body isn't the expected shape.
 async function errorDetail(res: Response, fallback: string): Promise<string> {
   try {
-    const body = await res.json();
+    const body: ErrorResponseBody | null = await res.json();
     if (typeof body?.detail === "string" && body.detail.trim()) {
       return body.detail;
     }
@@ -107,6 +104,16 @@ async function errorDetail(res: Response, fallback: string): Promise<string> {
     // body wasn't JSON — fall through
   }
   return `${fallback}: ${res.status}`;
+}
+
+// Mirrors backend `SessionListResponse`.
+interface ApiSessionListResponse {
+  sessions: ApiSessionResponse[];
+}
+
+// Mirrors backend `SessionNameGenerateResponse`.
+interface ApiSessionNameGenerateResponse {
+  name: string;
 }
 
 export async function createSession(
@@ -181,7 +188,7 @@ export async function fetchSessionHistory(): Promise<SessionHistoryItem[]> {
     throw new Error(`Failed to fetch session history: ${res.status}`);
   }
 
-  const data = await res.json();
+  const data: ApiSessionListResponse = await res.json();
   return data.sessions.map((s: ApiSessionResponse) => ({
     id: s.id,
     title: s.name || `Session ${s.id.slice(0, 8)}...`,
@@ -202,7 +209,7 @@ export async function generateSessionName(sessionId: string): Promise<string> {
     throw new Error(`Failed to generate session name: ${res.status}`);
   }
 
-  const data = await res.json();
+  const data: ApiSessionNameGenerateResponse = await res.json();
   return data.name;
 }
 
@@ -278,7 +285,7 @@ export async function restoreSession(
       continue;
     }
 
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to restore session: ${res.status}`
     );
@@ -333,6 +340,8 @@ function extractAttachmentsFromMetadata(
 ): BuildMessageAttachment[] {
   if (!Array.isArray(metadata?.attachments)) return [];
 
+  // Element of an unvalidated attachments array; the body below decodes it.
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters
   return metadata.attachments.flatMap((attachment: unknown) => {
     if (
       typeof attachment !== "object" ||
@@ -357,6 +366,11 @@ function extractAttachmentsFromMetadata(
   });
 }
 
+// Mirrors backend `MessageListResponse`.
+interface ApiMessageListResponse {
+  messages: ApiMessageResponse[];
+}
+
 export async function fetchMessages(
   sessionId: string
 ): Promise<BuildMessage[]> {
@@ -366,7 +380,7 @@ export async function fetchMessages(
     throw new Error(`Failed to fetch messages: ${res.status}`);
   }
 
-  const data = await res.json();
+  const data: ApiMessageListResponse = await res.json();
   return data.messages.map((m: ApiMessageResponse) => ({
     id: m.id,
     type: m.type,
@@ -379,17 +393,27 @@ export async function fetchMessages(
   }));
 }
 
-/**
- * Custom error class for rate limit (429) errors.
- * Used to distinguish rate limit errors from other API errors
- * so the UI can show an upsell modal instead of a generic error.
- */
-export class RateLimitError extends Error {
-  public readonly statusCode: number = 429;
+// 429 JSON body emitted by the backend usage rate-limiter (token/cost budgets).
+interface RateLimited429Body {
+  error_code?: string;
+  detail?: string;
+  scope?: string;
+  reset_at?: string;
+  retry_after_seconds?: number;
+}
 
-  constructor() {
-    super("Rate limit exceeded");
-    this.name = "RateLimitError";
+/**
+ * Thrown when the backend's usage rate-limiter (org/user token + cost
+ * budgets) rejects a turn with a structured 429. Carries the reset details
+ * so the UI can render the same rate-limit banner as chat.
+ */
+export class RateLimitedError extends Error {
+  public readonly details: RateLimitDetails;
+
+  constructor(message: string, details: RateLimitDetails) {
+    super(message);
+    this.name = "RateLimitedError";
+    this.details = details;
   }
 }
 
@@ -414,13 +438,9 @@ export async function createTurn(
           path: attachment.path,
           mime_type: attachment.mimeType,
         })),
-        ...(model
-          ? {
-              provider: CRAFT_GATEWAY_PROVIDER,
-              provider_id: model.providerId,
-              model: model.modelName,
-            }
-          : {}),
+        provider: model ? CRAFT_GATEWAY_PROVIDER : undefined,
+        provider_id: model?.providerId,
+        model: model?.modelName,
       }),
       signal,
     }
@@ -428,7 +448,20 @@ export async function createTurn(
 
   if (!res.ok) {
     if (res.status === 429) {
-      throw new RateLimitError();
+      const body: RateLimited429Body | null = await res
+        .json()
+        .catch(() => null);
+      if (body?.error_code === RATE_LIMITED_ERROR_CODE) {
+        throw new RateLimitedError(
+          body.detail || "You've reached your usage limit.",
+          {
+            scope: body.scope,
+            reset_at: body.reset_at,
+            retry_after_seconds: body.retry_after_seconds,
+          }
+        );
+      }
+      throw new Error(body?.detail || `Failed to create turn: ${res.status}`);
     }
     throw new Error(await errorDetail(res, "Failed to create turn"));
   }
@@ -447,7 +480,7 @@ export async function fetchActiveTurn(
     throw new Error(`Failed to fetch active turn: ${res.status}`);
   }
 
-  return (await res.json()) as ApiInteractiveTurnResponse | null;
+  return await res.json();
 }
 
 export async function fetchTurnEventStream(
@@ -515,7 +548,7 @@ export async function fetchArtifacts(sessionId: string): Promise<Artifact[]> {
     throw new Error(`Failed to fetch artifacts: ${res.status}`);
   }
 
-  const data = await res.json();
+  const data: ApiArtifactResponse[] = await res.json();
   // Backend returns a direct array, not wrapped in an object
   return data.map((a: ApiArtifactResponse) => ({
     id: a.id,
@@ -677,36 +710,6 @@ export async function fetchFileContent(
 }
 
 // =============================================================================
-// Usage Limits API
-// =============================================================================
-
-/** Transform API response to frontend types */
-function transformUsageLimitsResponse(
-  data: ApiUsageLimitsResponse
-): UsageLimits {
-  return {
-    isLimited: data.is_limited,
-    limitType: data.limit_type,
-    messagesUsed: data.messages_used,
-    limit: data.limit,
-    resetTimestamp: data.reset_timestamp
-      ? new Date(data.reset_timestamp)
-      : null,
-  };
-}
-
-export async function fetchUsageLimits(): Promise<UsageLimits> {
-  const res = await fetch(USAGE_LIMITS_ENDPOINT);
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch usage limits: ${res.status}`);
-  }
-
-  const data: ApiUsageLimitsResponse = await res.json();
-  return transformUsageLimitsResponse(data);
-}
-
-// =============================================================================
 // File Upload API
 // =============================================================================
 
@@ -733,7 +736,7 @@ export async function uploadFile(
   });
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to upload file: ${res.status}`);
   }
 
@@ -761,7 +764,7 @@ export async function deleteFile(
   );
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to delete file: ${res.status}`);
   }
 }
@@ -784,7 +787,7 @@ export async function exportDocx(
   );
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to export as DOCX: ${res.status}`
     );
@@ -821,7 +824,7 @@ export async function fetchPptxPreview(
   );
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to generate PPTX preview: ${res.status}`
     );
@@ -874,11 +877,11 @@ export async function postApprovalDecision(
   );
 
   if (res.status === 409) {
-    const body = (await res.json().catch(() => ({}))) as { detail?: string };
+    const body: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new ApprovalConflictError(body.detail ?? "decision conflict");
   }
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to post approval decision: ${res.status}`
     );
@@ -897,11 +900,11 @@ export async function postApprovalSessionGrant(
   );
 
   if (res.status === 409) {
-    const body = (await res.json().catch(() => ({}))) as { detail?: string };
+    const body: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new ApprovalConflictError(body.detail ?? "decision conflict");
   }
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to approve for session: ${res.status}`
     );
@@ -953,7 +956,7 @@ export async function uploadLibraryFiles(
   });
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to upload files: ${res.status}`
     );
@@ -979,7 +982,7 @@ export async function uploadLibraryZip(
   });
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to upload zip: ${res.status}`);
   }
 
@@ -999,7 +1002,7 @@ export async function createLibraryDirectory(
   });
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(
       errorData.detail || `Failed to create directory: ${res.status}`
     );
@@ -1020,7 +1023,7 @@ export async function deleteLibraryFile(documentId: string): Promise<void> {
   );
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
+    const errorData: ErrorResponseBody = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to delete file: ${res.status}`);
   }
 }

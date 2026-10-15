@@ -18,11 +18,13 @@ from onyx.configs.constants import MessageType
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.models import ChatMessage
 from onyx.db.tools import get_tools
-from onyx.llm.interfaces import LLM
+from onyx.llm.interfaces import LLM, GenerationContext
 from onyx.llm.models import (
     AssistantMessage,
-    ChatCompletionMessage,
+    GenerationRequest,
+    Message,
     SystemMessage,
+    TextContent,
     UserMessage,
 )
 from onyx.natural_language_processing.utils import get_tokenizer
@@ -34,12 +36,14 @@ from onyx.prompts.compression_prompts import (
     USER_REMINDER,
 )
 from onyx.tracing.flows import LLMFlow
-from onyx.tracing.framework.create import ensure_trace
-from onyx.tracing.llm_utils import llm_generation_span, record_llm_response
+from onyx.tracing.framework.create import ChatTraceMetadata, ensure_trace
 from onyx.utils.logger import setup_logger
-from shared_configs.contextvars import get_current_tenant_id
 
 logger = setup_logger()
+
+# The summary prompt asks for long-form output with no token cap, so this call
+# outruns the default invoke timeout. A timeout leaves the turn uncompressed.
+_SUMMARY_TIMEOUT_S = 180
 
 # Ratio of available context to allocate for recent messages after compression
 RECENT_MESSAGES_RATIO = 0.2
@@ -284,10 +288,14 @@ def _build_llm_messages_for_summarization(
                     tool_id_to_name.get(tc.tool_id, "unknown") for tc in msg.tool_calls
                 ]
                 result.append(
-                    AssistantMessage(content=f"[Used tools: {', '.join(tool_names)}]")
+                    AssistantMessage(
+                        content=[
+                            TextContent(text=f"[Used tools: {', '.join(tool_names)}]")
+                        ]
+                    )
                 )
             else:
-                result.append(AssistantMessage(content=msg.message))
+                result.append(AssistantMessage(content=[TextContent(text=msg.message)]))
             continue
 
         # Skip tool call response messages - tool calls are captured above via assistant messages
@@ -347,7 +355,7 @@ def generate_summary(
     )
 
     # Build message list with separate messages
-    input_messages: list[ChatCompletionMessage] = [
+    input_messages: list[Message] = [
         SystemMessage(content=system_content),
     ]
 
@@ -363,16 +371,16 @@ def generate_summary(
     # Add final reminder
     input_messages.append(UserMessage(content=final_reminder))
 
-    with llm_generation_span(
-        llm=llm,
-        flow=LLMFlow.CHAT_HISTORY_SUMMARIZATION,
-        input_messages=input_messages,
-    ) as span_generation:
-        response = llm.invoke(input_messages)
-        record_llm_response(span_generation, response)
+    response = llm.invoke(
+        GenerationRequest(messages=input_messages),
+        context=GenerationContext(
+            flow=LLMFlow.CHAT_HISTORY_SUMMARIZATION,
+            total_timeout_s=_SUMMARY_TIMEOUT_S,
+        ),
+    )
 
-    content = response.choice.message.content
-    if not (content and content.strip()):
+    content = response.text
+    if not content.strip():
         raise ValueError("LLM returned empty summary")
     return content.strip()
 
@@ -433,10 +441,7 @@ def compress_chat_history(
     with ensure_trace(
         "chat_history_compression",
         group_id=str(chat_session_id),
-        metadata={
-            "tenant_id": get_current_tenant_id(),
-            "chat_session_id": str(chat_session_id),
-        },
+        metadata=ChatTraceMetadata(chat_session_id=str(chat_session_id)).model_dump(),
     ):
         try:
             # Read phase: existing summary + tool name map. Closed before LLM call.

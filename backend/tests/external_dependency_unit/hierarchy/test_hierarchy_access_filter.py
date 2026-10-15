@@ -48,7 +48,6 @@ class UserSeed(BaseModel):
     is_active: bool
     is_superuser: bool
     is_verified: bool
-    role: UserRole
     account_type: AccountType
 
 
@@ -121,7 +120,6 @@ def connector_access_seed(
             is_active=True,
             is_superuser=False,
             is_verified=True,
-            role=UserRole.BASIC,
             account_type=AccountType.STANDARD,
         )
         for kind in ("owner", "member", "outsider")
@@ -130,9 +128,9 @@ def connector_access_seed(
         text(
             'INSERT INTO "user" '
             "(id, email, hashed_password, is_active, is_superuser, is_verified, "
-            "role, account_type) "
+            "account_type) "
             "VALUES (:id, :email, :hashed_password, :is_active, :is_superuser, "
-            ":is_verified, :role, :account_type)"
+            ":is_verified, :account_type)"
         ),
         [user.model_dump(mode="json") for user in user_rows],
     )
