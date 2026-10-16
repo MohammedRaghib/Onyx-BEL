@@ -1,30 +1,63 @@
-Documentation for how to deploy Onyx can be found in our official docs:
-https://docs.onyx.app/deployment/overview
+# Deployment Guide
 
-## Maintaining the compose files (contributors)
+Follow these steps to deploy the application stack using Docker Compose.
 
-`docker_compose/docker-compose.yml`, `docker-compose.prod.yml` and
-`docker-compose.prod-no-letsencrypt.yml` are generated from the single source of truth
-`docker_compose/docker-compose.template.yml` — do not hand-edit them. To change any of the three,
-edit the template (per-variant differences are expressed with `#!for` / `#!only` / `#!value`
-directives, documented in `ods generate-compose --help`) and regenerate:
+---
+
+## 1. Clone the Repository
+
+Clone the repository to your server and enter the project root directory:
+
+```bash
+git clone <repository-url>
+cd <repository-name>
 
 ```
-ods generate-compose --write
+
+---
+
+## 2. Prepare Data Directory and Bind Mount Permissions
+
+Create the local data directory and update its permissions so the Docker containers can read and write to the mounted volumes without ownership conflicts:
+
+```bash
+mkdir -p data
+sudo chown -R 1000:1000 data
+
 ```
 
-The generator lives in `tools/ods` (`internal/composegen`) and ships with the `onyx-devtools`
-package. The `docker-compose-sync` pre-commit hook runs it automatically for commits touching the
-template or the generated files, so a stray edit to a generated file gets reverted on the next
-commit.
+> **Note:** Adjust `1000:1000` if your containers run under a different target UID/GID.
 
-onyx-cli embeds copies of the guided-install deployment files (the generated
-`docker-compose.yml` and `docker-compose.prod.yml`, the lite/craft overlays, the env templates,
-the nginx config, and `docker_compose/README.md`) under
-`cli/internal/deploy/deployfiles/embedded/`. The same `ods generate-compose --write` run refreshes
-them after rendering the variants, and a drift test in the cli module (`go test ./...`) gates
-staleness. If you change any of those files, re-run the generator and commit the refreshed embedded
-copies.
+---
 
-Note that `docker_compose/README.md` ships inside every self-hosted install, so keep it
-user-facing — contributor notes like this one belong here instead.
+## 3. Configure Environment Variables
+
+Navigate to the deployment directory, copy the template environment file, and edit it with your configuration values:
+
+```bash
+cd deployment/docker_compose
+cp env.template .env
+nano .env
+
+```
+
+> **Note:** Fill in all required database credentials, API keys, host domains, and secrets inside `.env` before proceeding.
+
+---
+
+## 4. Launch the Services
+
+Start the Docker Compose services in detached mode:
+
+```bash
+docker compose up -d
+
+```
+
+To verify that all containers are running successfully:
+
+```bash
+docker compose ps
+docker compose logs -f
+
+```

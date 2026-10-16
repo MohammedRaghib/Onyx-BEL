@@ -65,8 +65,6 @@ const Page = async (props: {
   }
   const appName = await fetchAppName();
 
-  const appName = combinedSettings?.appName || "Onyx";
-
   return (
     <AuthFlowContainer authState="signup">
       <AuthErrorDisplay searchParams={searchParams} />
